@@ -1,0 +1,33 @@
+{
+  "manifest_version": 2,
+  "id": "mai-beeper.beeper-adapter",
+  "version": "0.2.2",
+  "name": "Mai Beeper Adapter",
+  "description": "讓 MaiBot 透過 Beeper Desktop API 收發訊息，並支援聊天室名稱搜尋與訊息配對。",
+  "author": {
+    "name": "sunfish1728",
+    "url": "https://github.com/sunfish1728"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter",
+    "homepage": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter",
+    "documentation": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter/blob/main/README.md",
+    "issues": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter/issues"
+  },
+  "plugin_type": "adapter",
+  "host_application": {
+    "min_version": "1.2.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.8.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [],
+  "i18n": {
+    "default_locale": "zh-TW",
+    "supported_locales": ["zh-TW"]
+  }
+}

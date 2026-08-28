@@ -1,0 +1,25 @@
+[project]
+name = "mai-beeper-adapter"
+version = "0.2.2"
+description = "Beeper Desktop API message gateway for MaiBot"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "aiohttp>=3.12.14",
+  "maibot-plugin-sdk>=2.8.0,<3.0.0",
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
