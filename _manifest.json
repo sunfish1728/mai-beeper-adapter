@@ -10,10 +10,10 @@
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter",
-    "homepage": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter",
-    "documentation": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter/blob/main/README.md",
-    "issues": "https://github.com/sunfish1728/MaiBot-Beeper-Adapter/issues"
+    "repository": "https://github.com/sunfish1728/mai-beeper-adapter",
+    "homepage": "https://github.com/sunfish1728/mai-beeper-adapter",
+    "documentation": "https://github.com/sunfish1728/mai-beeper-adapter/blob/main/README.md",
+    "issues": "https://github.com/sunfish1728/mai-beeper-adapter/issues"
   },
   "plugin_type": "adapter",
   "host_application": {
