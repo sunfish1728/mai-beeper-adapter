@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_manifest_targets_current_maibot_sdk() -> None:
     manifest = json.loads((ROOT / "_manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == 2
-    assert manifest["version"] == "0.2.2"
+    assert manifest["version"] == "0.3.0"
     assert manifest["plugin_type"] == "adapter"
     assert manifest["author"]["url"]
     assert manifest["urls"]["repository"]

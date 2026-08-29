@@ -6,13 +6,14 @@
 
 - 私聊與群聊文字收發
 - 圖片收發
+- 語音收發（包含 GPT-SoVITS 等插件產生的 Base64 語音）
 - 聊天白名單
 - 依聊天室名稱自動尋找 Chat ID
 - 傳送配對文字，自動綁定聊天室
 - 自動重連、定時補漏、訊息去重
 - Beeper WebSocket 暫時失效時改用 REST API 繼續收訊
 
-語音、影片與一般檔案目前會顯示成文字提示，不會傳送檔案本身。
+影片與一般檔案目前會顯示成文字提示，不會傳送檔案本身。Beeper 接收的語音會保留原始音訊交給 MaiBot；實際能否辨識內容，取決於 MaiBot 已安裝的語音辨識功能。
 
 ## 使用前準備
 
@@ -45,12 +46,12 @@ Token 等同於操作你 Beeper 聊天的鑰匙，請不要貼到公開場合。
 也可以在 MaiBot 的 `plugins` 資料夾使用 Git 安裝：
 
 ```text
-git clone https://github.com/sunfish1728/MaiBot-Beeper-Adapter.git mai-beeper-adapter
+git clone https://github.com/sunfish1728/mai-beeper-adapter.git mai-beeper-adapter
 ```
 
 ### 方法三：ZIP
 
-將發布的 `Mai-Beeper-Adapter-0.2.2.zip` 解壓縮，再把裡面的同名資料夾放進 MaiBot 的 `plugins` 目錄。
+將發布的 `Mai-Beeper-Adapter-0.3.0.zip` 解壓縮，再把裡面的同名資料夾放進 MaiBot 的 `plugins` 目錄。
 
 ## 第一次設定
 
@@ -77,7 +78,8 @@ git clone https://github.com/sunfish1728/MaiBot-Beeper-Adapter.git mai-beeper-ad
 
 1. 傳送一段普通文字，確認 MaiBot 能看到並回覆。
 2. 傳送一張圖片，確認 MaiBot 能讀到圖片。
-3. 關閉 Beeper Desktop 約半分鐘後重新開啟，確認插件會自行恢復。
+3. 傳送一段語音，確認 MaiBot 能收到；再讓語音插件產生一段語音，確認 Beeper 聊天中出現可播放的音訊。
+4. 關閉 Beeper Desktop 約半分鐘後重新開啟，確認插件會自行恢復。
 
 群聊中要不要主動回覆、多久回一次，仍由 MaiBot 自己的聊天策略決定。
 

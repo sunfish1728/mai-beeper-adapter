@@ -55,6 +55,8 @@ def build_message_dict(
     chat: Mapping[str, Any],
     image_segments: list[dict[str, Any]],
     image_failures: int = 0,
+    voice_segments: list[dict[str, Any]] | None = None,
+    voice_failures: int = 0,
 ) -> dict[str, Any]:
     message_id = str(message.get("id") or "").strip()
     chat_id = str(message.get("chatID") or chat.get("id") or "").strip()
@@ -72,6 +74,9 @@ def build_message_dict(
     if text:
         raw_message.append({"type": "text", "data": text})
     raw_message.extend(image_segments)
+    voice_segments = voice_segments or []
+    raw_message.extend(voice_segments)
+    voice_successes = len(voice_segments)
 
     plain_parts = [text] if text else []
     attachments = message.get("attachments")
@@ -87,6 +92,15 @@ def build_message_dict(
                 plain_parts.append(failure_label)
                 raw_message.append({"type": "text", "data": failure_label})
                 image_failures -= 1
+            elif _is_audio_attachment(attachment) and voice_successes > 0:
+                plain_parts.append(attachment_label(attachment))
+                voice_successes -= 1
+                continue
+            elif _is_audio_attachment(attachment) and voice_failures > 0:
+                failure_label = "[音訊載入失敗]"
+                plain_parts.append(failure_label)
+                raw_message.append({"type": "text", "data": failure_label})
+                voice_failures -= 1
             else:
                 label = attachment_label(attachment)
                 plain_parts.append(label)
@@ -144,3 +158,31 @@ def make_image_segment(data: bytes, mime_type: str, file_name: str = "") -> dict
         "data": {"mime_type": mime_type, "file_name": file_name},
         "binary_data_base64": base64.b64encode(data).decode("ascii"),
     }
+
+
+def make_voice_segment(
+    data: bytes,
+    mime_type: str,
+    file_name: str = "",
+    *,
+    is_voice_note: bool = False,
+    duration: float | None = None,
+) -> dict[str, Any]:
+    segment_data: dict[str, Any] = {
+        "mime_type": mime_type,
+        "file_name": file_name,
+        "is_voice_note": is_voice_note,
+    }
+    if duration is not None:
+        segment_data["duration"] = duration
+    return {
+        "type": "voice",
+        "data": segment_data,
+        "binary_data_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def _is_audio_attachment(attachment: Mapping[str, Any]) -> bool:
+    kind = str(attachment.get("type") or "").strip().lower()
+    mime_type = str(attachment.get("mimeType") or attachment.get("mime_type") or "").strip().lower()
+    return kind in {"audio", "voice"} or mime_type.startswith("audio/") or bool(attachment.get("isVoiceNote"))

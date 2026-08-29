@@ -139,6 +139,30 @@ async def test_outbound_text_and_multiple_images_preserve_order(tmp_path: Path) 
     assert client.sends[2]["text"] == "結尾"
 
 
+@pytest.mark.asyncio
+async def test_outbound_voice_base64_is_uploaded_as_audio_attachment(tmp_path: Path) -> None:
+    plugin, _ = configured_plugin(tmp_path)
+    client = FakeClient()
+    plugin._client = cast(Any, client)
+
+    results = await plugin._send_outbound(
+        "chat-1",
+        {
+            "raw_message": [
+                {
+                    "type": "voice",
+                    "data": {"mime_type": "audio/wav", "file_name": "voice.wav"},
+                    "binary_data_base64": "UklGRg==",
+                }
+            ]
+        },
+    )
+
+    assert len(results) == 1
+    assert client.uploads == [(b"RIFF", "voice.wav", "audio/wav")]
+    assert client.sends[0]["attachment"]["type"] == "audio"
+
+
 def test_outbound_chat_id_prefers_beeper_specific_target() -> None:
     target = MaiBeeperAdapterPlugin._outbound_chat_id(
         {
@@ -347,3 +371,41 @@ async def test_inbound_route_matches_registered_gateway_route(tmp_path: Path) ->
     inbound = gateway.messages[-1]["route_metadata"]
     assert inbound["self_id"] == registered["account_id"]
     assert inbound["connection_id"] == registered["scope"]
+
+
+@pytest.mark.asyncio
+async def test_inbound_audio_is_routed_as_voice_segment(tmp_path: Path) -> None:
+    plugin, gateway = configured_plugin(tmp_path)
+    plugin._client = cast(Any, FakeClient())
+    plugin._chat_cache["chat-1"] = {"id": "chat-1", "title": "測試聊天", "type": "single"}
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-audio")
+
+    await plugin._route_inbound(
+        {
+            "id": "incoming-voice",
+            "accountID": "facebook-account",
+            "chatID": "chat-1",
+            "senderID": "sender-1",
+            "senderName": "測試使用者",
+            "timestamp": "2026-08-30T02:38:33Z",
+            "text": "",
+            "isSender": False,
+            "attachments": [
+                {
+                    "id": "attachment-opaque-id",
+                    "type": "audio",
+                    "fileName": "voice.ogg",
+                    "mimeType": "audio/ogg",
+                    "srcURL": str(audio_path),
+                    "isVoiceNote": True,
+                }
+            ],
+        }
+    )
+
+    raw_message = gateway.messages[-1]["message"]["raw_message"]
+    assert raw_message[0]["type"] == "voice"
+    assert raw_message[0]["data"]["mime_type"] == "audio/ogg"
+    assert raw_message[0]["data"]["is_voice_note"] is True
+    assert raw_message[0]["binary_data_base64"] == "T2dnUy1hdWRpbw=="

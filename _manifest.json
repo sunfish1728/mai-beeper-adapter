@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "mai-beeper.beeper-adapter",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "name": "Mai Beeper Adapter",
-  "description": "讓 MaiBot 透過 Beeper Desktop API 收發訊息，並支援聊天室名稱搜尋與訊息配對。",
+  "description": "讓 MaiBot 透過 Beeper Desktop API 收發文字、圖片與語音，並支援聊天室名稱搜尋與訊息配對。",
   "author": {
     "name": "sunfish1728",
     "url": "https://github.com/sunfish1728"

@@ -14,7 +14,7 @@ from aiohttp import WSMsgType
 from maibot_sdk import MaiBotPlugin, MessageGateway, PluginConfigBase
 
 from .client import BeeperAPIError, BeeperClient
-from .converter import build_message_dict, make_image_segment, should_ignore_message
+from .converter import build_message_dict, make_image_segment, make_voice_segment, should_ignore_message
 from .settings import BEEPER_ACCOUNT_ID, BEEPER_CONNECTION_ID, GATEWAY_NAME, MaiBeeperSettings
 
 
@@ -427,18 +427,41 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
 
         image_segments: list[dict[str, Any]] = []
         image_failures = 0
+        voice_segments: list[dict[str, Any]] = []
+        voice_failures = 0
         attachments = message.get("attachments")
         if isinstance(attachments, list):
             for attachment in attachments:
-                if not isinstance(attachment, Mapping) or str(attachment.get("type") or "").lower() != "img":
+                if not isinstance(attachment, Mapping):
                     continue
-                try:
-                    image_segments.append(await self._inbound_image_segment(attachment))
-                except (BeeperAPIError, OSError, ValueError) as exc:
-                    image_failures += 1
-                    self.ctx.logger.warning("Beeper 圖片載入失敗，改用文字提示: %s", exc)
+                kind = str(attachment.get("type") or "").lower()
+                mime_type = str(attachment.get("mimeType") or "").lower()
+                is_audio = (
+                    kind in {"audio", "voice"}
+                    or mime_type.startswith("audio/")
+                    or bool(attachment.get("isVoiceNote"))
+                )
+                if kind == "img":
+                    try:
+                        image_segments.append(await self._inbound_image_segment(attachment))
+                    except (BeeperAPIError, OSError, ValueError) as exc:
+                        image_failures += 1
+                        self.ctx.logger.warning("Beeper 圖片載入失敗，改用文字提示: %s", exc)
+                elif is_audio:
+                    try:
+                        voice_segments.append(await self._inbound_voice_segment(attachment))
+                    except (BeeperAPIError, OSError, ValueError) as exc:
+                        voice_failures += 1
+                        self.ctx.logger.warning("Beeper 音訊載入失敗，改用文字提示: %s", exc)
 
-        message_dict = build_message_dict(message, chat or {}, image_segments, image_failures)
+        message_dict = build_message_dict(
+            message,
+            chat or {},
+            image_segments,
+            image_failures,
+            voice_segments,
+            voice_failures,
+        )
         external_id = f"{chat_id}:{message.get('id')}"
         accepted = await self.ctx.gateway.route_message(
             gateway_name=GATEWAY_NAME,
@@ -457,7 +480,7 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
     async def _inbound_image_segment(self, attachment: Mapping[str, Any]) -> dict[str, Any]:
         if self._client is None:
             raise BeeperAPIError("Beeper 尚未連線")
-        media_url = str(attachment.get("id") or attachment.get("srcURL") or "").strip()
+        media_url = str(attachment.get("srcURL") or attachment.get("id") or "").strip()
         if not media_url:
             raise BeeperAPIError("圖片缺少下載位置")
         source = media_url
@@ -467,6 +490,28 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         mime_type = str(attachment.get("mimeType") or detected_type or "image/jpeg").strip()
         file_name = str(attachment.get("fileName") or "image").strip()
         return make_image_segment(data, mime_type, file_name)
+
+    async def _inbound_voice_segment(self, attachment: Mapping[str, Any]) -> dict[str, Any]:
+        if self._client is None:
+            raise BeeperAPIError("Beeper 尚未連線")
+        media_url = str(attachment.get("srcURL") or attachment.get("id") or "").strip()
+        if not media_url:
+            raise BeeperAPIError("音訊缺少下載位置")
+        source = media_url
+        if media_url.startswith(("mxc://", "localmxc://")):
+            source = await self._client.download_asset(media_url)
+        data, detected_type = await self._read_media_source(source, media_label="音訊")
+        mime_type = str(attachment.get("mimeType") or detected_type or "audio/ogg").strip()
+        file_name = str(attachment.get("fileName") or "voice.ogg").strip()
+        duration_value = attachment.get("duration")
+        duration = float(duration_value) if isinstance(duration_value, (int, float)) else None
+        return make_voice_segment(
+            data,
+            mime_type,
+            file_name,
+            is_voice_note=bool(attachment.get("isVoiceNote")),
+            duration=duration,
+        )
 
     async def _send_outbound(self, chat_id: str, message: Mapping[str, Any]) -> list[dict[str, Any]]:
         if self._client is None:
@@ -489,21 +534,29 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
             if item_type == "text":
                 pending_text.append(str(item.get("data") or ""))
                 continue
-            if item_type not in {"image", "emoji"}:
+            if item_type not in {"image", "emoji", "voice", "audio"}:
                 continue
 
-            image_data, mime_type, file_name = await self._outbound_image(item)
-            upload = await self._client.upload_file(image_data, file_name, mime_type)
+            is_audio = item_type in {"voice", "audio"}
+            media_data, mime_type, file_name = await (
+                self._outbound_audio(item) if is_audio else self._outbound_image(item)
+            )
+            upload = await self._client.upload_file(media_data, file_name, mime_type)
             attachment = {
                 "uploadID": str(upload["uploadID"]),
                 "fileName": str(upload.get("fileName") or file_name),
                 "mimeType": str(upload.get("mimeType") or mime_type),
-                "type": "image",
+                "type": "audio" if is_audio else "image",
             }
-            width = upload.get("width")
-            height = upload.get("height")
-            if isinstance(width, (int, float)) and isinstance(height, (int, float)):
-                attachment["size"] = {"width": int(width), "height": int(height)}
+            if is_audio:
+                duration = upload.get("duration")
+                if isinstance(duration, (int, float)):
+                    attachment["duration"] = duration
+            else:
+                width = upload.get("width")
+                height = upload.get("height")
+                if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+                    attachment["size"] = {"width": int(width), "height": int(height)}
             results.append(
                 await self._client.send_message(
                     chat_id,
@@ -521,7 +574,7 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                 await self._client.send_message(chat_id, text=final_text, reply_to_message_id=reply_to)
             )
         if not results:
-            raise BeeperAPIError("MaiBot 回覆中沒有可傳送的文字或圖片")
+            raise BeeperAPIError("MaiBot 回覆中沒有可傳送的文字、圖片或語音")
         return results
 
     async def _outbound_image(self, item: Mapping[str, Any]) -> tuple[bytes, str, str]:
@@ -556,7 +609,50 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                 file_name = guessed_name
         return data, mime_type, file_name
 
-    async def _read_media_source(self, source: str) -> tuple[bytes, str]:
+    async def _outbound_audio(self, item: Mapping[str, Any]) -> tuple[bytes, str, str]:
+        encoded = str(item.get("binary_data_base64") or "").strip()
+        data_field = item.get("data")
+        mime_type = "audio/wav"
+        file_name = "maibot-voice.wav"
+        source = ""
+        if isinstance(data_field, Mapping):
+            encoded = encoded or str(
+                data_field.get("binary_data_base64")
+                or data_field.get("audio_base64")
+                or data_field.get("base64")
+                or ""
+            ).strip()
+            mime_type = str(data_field.get("mime_type") or data_field.get("mimeType") or mime_type).strip()
+            file_name = str(data_field.get("file_name") or data_field.get("fileName") or file_name).strip()
+            source = str(
+                data_field.get("file")
+                or data_field.get("path")
+                or data_field.get("url")
+                or data_field.get("media")
+                or ""
+            ).strip()
+        else:
+            source = str(data_field or "").strip()
+        if encoded.startswith("data:") and ";base64," in encoded:
+            header, encoded = encoded.split(",", 1)
+            mime_type = header[5:].split(";", 1)[0] or mime_type
+        if encoded:
+            try:
+                return base64.b64decode(encoded, validate=True), mime_type, file_name
+            except ValueError as exc:
+                raise BeeperAPIError("MaiBot 語音的 Base64 資料無效") from exc
+        if not source:
+            raise BeeperAPIError("MaiBot 語音缺少資料")
+        data, detected_type = await self._read_media_source(source, media_label="音訊")
+        mime_type = detected_type or mime_type
+        parsed = urlparse(source)
+        if parsed.path:
+            guessed_name = Path(unquote(parsed.path)).name
+            if guessed_name:
+                file_name = guessed_name
+        return data, mime_type, file_name
+
+    async def _read_media_source(self, source: str, *, media_label: str = "圖片") -> tuple[bytes, str]:
         parsed = urlparse(source)
         if parsed.scheme in {"http", "https"}:
             if self._client is None:
@@ -569,9 +665,9 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
             path_text = path_text[1:]
         path = Path(path_text)
         if not path.is_file():
-            raise BeeperAPIError("找不到圖片檔案")
+            raise BeeperAPIError(f"找不到{media_label}檔案")
         if path.stat().st_size > 25 * 1024 * 1024:
-            raise BeeperAPIError("圖片超過 25 MB，已略過")
+            raise BeeperAPIError(f"{media_label}超過 25 MB，已略過")
         return path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
     @staticmethod

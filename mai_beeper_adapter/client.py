@@ -112,7 +112,7 @@ class BeeperClient:
         if reply_to_message_id:
             body["replyToMessageID"] = reply_to_message_id
         if not body:
-            raise BeeperAPIError("沒有可傳送的文字或圖片")
+            raise BeeperAPIError("沒有可傳送的文字或附件")
         return await self._json(
             "POST",
             f"/v1/chats/{quote(chat_id, safe='')}/messages",
@@ -129,7 +129,7 @@ class BeeperClient:
         payload = await self._json("POST", "/v1/assets/upload", data=form)
         upload_id = str(payload.get("uploadID") or "").strip()
         if not upload_id:
-            raise BeeperAPIError(str(payload.get("error") or "Beeper 沒有回傳圖片 uploadID"))
+            raise BeeperAPIError(str(payload.get("error") or "Beeper 沒有回傳附件 uploadID"))
         return payload
 
     async def download_asset(self, media_url: str) -> str:
