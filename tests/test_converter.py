@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 from mai_beeper_adapter.converter import build_message_dict, make_image_segment, should_ignore_message
 
@@ -79,6 +80,16 @@ def test_image_and_unsupported_attachment_conversion() -> None:
     assert base64.b64decode(result["raw_message"][0]["binary_data_base64"]) == b"png-data"
     assert result["raw_message"][1] == {"type": "text", "data": "[音訊: voice.ogg]"}
     assert "[音訊: voice.ogg]" in result["processed_plain_text"]
+
+
+def test_image_segment_uses_maibot_binary_image_contract() -> None:
+    image_bytes = b"\xff\xd8\xff\xe0jpeg-body\xff\xd9"
+    segment = make_image_segment(image_bytes, "image/jpeg", "photo.jpg")
+
+    assert segment["type"] == "image"
+    assert segment["data"] == ""
+    assert segment["hash"] == hashlib.sha256(image_bytes).hexdigest()
+    assert base64.b64decode(segment["binary_data_base64"]) == image_bytes
 
 
 def test_failed_image_becomes_text_instead_of_dropping_message() -> None:

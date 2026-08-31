@@ -32,8 +32,7 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         self._wake_event: asyncio.Event | None = None
         self._ready = False
         self._chat_cache: dict[str, dict[str, Any]] = {}
-        self._resolved_name_chat_ids: set[str] = set()
-        self._paired_chat_ids: set[str] = set()
+        self._paired_chats: dict[str, str] = {}
         self._pairing_seen_preview_ids: set[str] = set()
         self._pairing_baseline_ready = False
         self._cursors: dict[str, str] = {}
@@ -48,7 +47,11 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         if scope != "self":
             return
+        previous_name_keys = set(self._configured_chat_names())
         self.set_plugin_config(config_data)
+        removed_name_keys = previous_name_keys - set(self._configured_chat_names())
+        if removed_name_keys:
+            self._revoke_chat_names(removed_name_keys)
         self.ctx.logger.info("Mai Beeper Adapter 設定已更新%s", f"（{version}）" if version else "")
         await self._restart()
 
@@ -98,11 +101,45 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         return config
 
     def _allowed_chat_ids(self) -> set[str]:
-        return (
-            set(self._settings().beeper.allowed_chat_ids)
-            | self._resolved_name_chat_ids
-            | self._paired_chat_ids
-        )
+        configured_name_keys = set(self._configured_chat_names())
+        return {
+            chat_id
+            for chat_name, chat_id in self._paired_chats.items()
+            if chat_name.casefold() in configured_name_keys and chat_id
+        }
+
+    def _configured_chat_names(self) -> dict[str, str]:
+        return {name.casefold(): name for name in self._settings().beeper.chat_names}
+
+    def _pairing_needed(self) -> bool:
+        paired_name_keys = {name.casefold() for name in self._paired_chats}
+        return bool(set(self._configured_chat_names()) - paired_name_keys)
+
+    def _revoke_chat_names(self, name_keys: set[str]) -> None:
+        """刪除聊天室名稱時，同步撤銷其 Beeper ID 與監聽狀態。"""
+
+        removed_chat_ids = {
+            chat_id for chat_name, chat_id in self._paired_chats.items() if chat_name.casefold() in name_keys
+        }
+        self._paired_chats = {
+            chat_name: chat_id
+            for chat_name, chat_id in self._paired_chats.items()
+            if chat_name.casefold() not in name_keys
+        }
+        self._discard_chat_runtime(removed_chat_ids)
+        self._save_state()
+        if removed_chat_ids:
+            self.ctx.logger.info("已刪除 Beeper 聊天連結: %s", ", ".join(sorted(removed_chat_ids)))
+
+    def _discard_chat_runtime(self, chat_ids: set[str]) -> None:
+        """清除不再授權的聊天室同步狀態。"""
+
+        if not chat_ids:
+            return
+        self._initialized_chats.difference_update(chat_ids)
+        for chat_id in chat_ids:
+            self._cursors.pop(chat_id, None)
+            self._chat_cache.pop(chat_id, None)
 
     async def _restart(self) -> None:
         await self._stop()
@@ -188,12 +225,12 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         assert self._stop_event is not None
         assert self._wake_event is not None
         while not self._stop_event.is_set():
-            if self._settings().discovery.pairing_enabled:
+            if self._pairing_needed():
                 try:
                     await self._refresh_chat_cache(scan_pairing=True)
                     await self._initialize_new_chats()
                 except BeeperAPIError as exc:
-                    self.ctx.logger.warning("Beeper 配對掃描暫時失敗，既有聊天室仍會繼續同步: %s", exc)
+                    self.ctx.logger.warning("Beeper 聊天配對掃描暫時失敗，既有聊天室仍會繼續同步: %s", exc)
             for chat_id in sorted(self._allowed_chat_ids()):
                 await self._reconcile_chat(chat_id)
             self._wake_event.clear()
@@ -215,9 +252,7 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                         {
                             "type": "subscriptions.set",
                             "requestID": "mai-beeper-subscription",
-                            "chatIDs": ["*"]
-                            if self._settings().discovery.pairing_enabled
-                            else sorted(self._allowed_chat_ids()),
+                            "chatIDs": ["*"] if self._pairing_needed() else sorted(self._allowed_chat_ids()),
                         }
                     )
                     delay = 2.0
@@ -229,7 +264,8 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                                 continue
                             if payload.get("type") == "message.upserted":
                                 chat_id = str(payload.get("chatID") or "").strip()
-                                if chat_id in self._allowed_chat_ids() and self._wake_event is not None:
+                                should_wake = chat_id in self._allowed_chat_ids() or self._pairing_needed()
+                                if should_wake and self._wake_event is not None:
                                     self._wake_event.set()
                             elif payload.get("type") == "error":
                                 self.ctx.logger.warning(
@@ -270,21 +306,16 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         elif scan_pairing:
             self._scan_pairing_previews(chats)
 
-        if not scan_pairing:
-            await self._resolve_named_chats()
-
         allowed = sorted(self._allowed_chat_ids())
-        if not allowed:
-            lines: list[str] = []
-            for chat in list(self._chat_cache.values())[:30]:
-                lines.append(
-                    f"- {chat.get('network') or 'Beeper'} | {chat.get('title') or '(無標題)'} | {chat.get('id')}"
-                )
-            if lines:
-                self.ctx.logger.info(
-                    "尚未選擇 Beeper 聊天。可填聊天室名稱、開啟訊息配對，或使用以下 chatID:\n%s",
-                    "\n".join(lines),
-                )
+        configured_names = self._settings().beeper.chat_names
+        if not configured_names:
+            self.ctx.logger.info("尚未設定 Beeper 聊天白名單；請新增聊天室名稱並儲存設定")
+        elif not allowed:
+            self.ctx.logger.info(
+                "正在等待配對 Beeper 聊天：%s。請到聊天室傳送完整配對文字「%s」",
+                "、".join(configured_names),
+                self._settings().beeper.pairing_phrase,
+            )
         else:
             for chat_id in allowed:
                 if chat_id not in self._chat_cache:
@@ -292,35 +323,6 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                         self._chat_cache[chat_id] = await self._client.get_chat(chat_id)
                     except BeeperAPIError as exc:
                         self.ctx.logger.warning("無法讀取白名單聊天 %s: %s", chat_id, exc)
-
-    async def _resolve_named_chats(self) -> None:
-        if self._client is None:
-            return
-        resolved: set[str] = set()
-        for requested_name in self._settings().discovery.allowed_chat_names:
-            try:
-                payload = await self._client.search_chats(requested_name, limit=50)
-            except BeeperAPIError as exc:
-                self.ctx.logger.warning("無法依名稱尋找 Beeper 聊天「%s」: %s", requested_name, exc)
-                continue
-            items = payload.get("items")
-            candidates = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
-            exact = [
-                item
-                for item in candidates
-                if str(item.get("title") or "").strip().casefold() == requested_name.casefold() and item.get("id")
-            ]
-            if len(exact) == 1:
-                chat = exact[0]
-                chat_id = str(chat["id"])
-                resolved.add(chat_id)
-                self._chat_cache[chat_id] = chat
-                self.ctx.logger.info("已依名稱找到 Beeper 聊天: %s", self._chat_label(chat_id))
-            elif len(exact) > 1:
-                self.ctx.logger.warning("Beeper 有 %d 個同名聊天「%s」，請改用訊息配對", len(exact), requested_name)
-            else:
-                self.ctx.logger.warning("找不到名稱完全相同的 Beeper 聊天「%s」", requested_name)
-        self._resolved_name_chat_ids = resolved
 
     def _remember_pairing_previews(self, chats: list[dict[str, Any]]) -> None:
         for chat in chats:
@@ -331,8 +333,8 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                     self._pairing_seen_preview_ids.add(message_id)
 
     def _scan_pairing_previews(self, chats: list[dict[str, Any]]) -> None:
-        phrase = self._settings().discovery.pairing_phrase
-        unpairing_phrase = self._settings().discovery.unpairing_phrase
+        phrase = self._settings().beeper.pairing_phrase
+        configured_names = self._configured_chat_names()
         for chat in chats:
             chat_id = str(chat.get("id") or "").strip()
             preview = chat.get("preview")
@@ -343,20 +345,20 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                 continue
             self._pairing_seen_preview_ids.add(message_id)
             text = str(preview.get("text") or "").strip()
-            if text == unpairing_phrase and chat_id in self._paired_chat_ids:
-                self._paired_chat_ids.remove(chat_id)
-                self._initialized_chats.discard(chat_id)
-                self._cursors.pop(chat_id, None)
-                self._save_state()
-                self.ctx.logger.info("Beeper 訊息取消配對成功: %s", self._chat_label(chat_id))
-                continue
             if text != phrase:
                 continue
-            if chat_id not in self._paired_chat_ids:
-                self._paired_chat_ids.add(chat_id)
-                self._chat_cache[chat_id] = chat
-                self._save_state()
-                self.ctx.logger.info("Beeper 訊息配對成功: %s", self._chat_label(chat_id))
+            chat_title = str(chat.get("title") or "").strip()
+            configured_name = configured_names.get(chat_title.casefold())
+            if not configured_name:
+                self.ctx.logger.warning("忽略未列入白名單的 Beeper 聊天配對: %s", chat_title or chat_id)
+                continue
+            previous_chat_id = self._paired_chats.get(configured_name)
+            if previous_chat_id and previous_chat_id != chat_id:
+                self._discard_chat_runtime({previous_chat_id})
+            self._paired_chats[configured_name] = chat_id
+            self._chat_cache[chat_id] = chat
+            self._save_state()
+            self.ctx.logger.info("Beeper 聊天配對成功: %s", self._chat_label(chat_id))
 
     async def _initialize_new_chats(self) -> None:
         if self._client is None:
@@ -378,6 +380,8 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
     async def _reconcile_chat(self, chat_id: str) -> None:
         if self._client is None:
             return
+        if chat_id not in self._allowed_chat_ids():
+            return
         if chat_id not in self._initialized_chats:
             await self._initialize_new_chats()
             return
@@ -391,6 +395,9 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         for message in messages:
             await self._route_inbound(message)
 
+        if chat_id not in self._allowed_chat_ids():
+            return
+
         newest_cursor = str(payload.get("newestCursor") or "").strip()
         if newest_cursor and newest_cursor != cursor:
             self._cursors[chat_id] = newest_cursor
@@ -398,6 +405,8 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
 
         page_guard = 0
         while cursor and bool(payload.get("hasMore")) and page_guard < 20:
+            if chat_id not in self._allowed_chat_ids():
+                return
             page_guard += 1
             cursor = self._cursors.get(chat_id, cursor)
             payload = await self._client.list_messages(chat_id, cursor=cursor, direction="after")
@@ -729,10 +738,9 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         return Path(self.ctx.paths.data_dir) / "sync_state.json"
 
     def _load_state(self) -> None:
-        self._resolved_name_chat_ids = set()
         self._cursors = {}
         self._initialized_chats = set()
-        self._paired_chat_ids = set()
+        self._paired_chats = {}
         self._pairing_seen_preview_ids = set()
         self._pairing_baseline_ready = False
         path = self._state_path()
@@ -742,7 +750,7 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
             payload = json.loads(path.read_text(encoding="utf-8"))
             cursors = payload.get("cursors", {})
             initialized = payload.get("initialized_chats", [])
-            paired = payload.get("paired_chat_ids", [])
+            paired = payload.get("paired_chats", {})
             if isinstance(cursors, dict):
                 self._cursors = {
                     str(key): str(value)
@@ -751,8 +759,18 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
                 }
             if isinstance(initialized, list):
                 self._initialized_chats = {str(item) for item in initialized if str(item).strip()}
-            if isinstance(paired, list):
-                self._paired_chat_ids = {str(item) for item in paired if str(item).strip()}
+            if isinstance(paired, dict):
+                configured_names = self._configured_chat_names()
+                for stored_name, stored_chat_id in paired.items():
+                    configured_name = configured_names.get(str(stored_name).strip().casefold())
+                    chat_id = str(stored_chat_id or "").strip()
+                    if configured_name and chat_id:
+                        self._paired_chats[configured_name] = chat_id
+            allowed_chat_ids = self._allowed_chat_ids()
+            self._cursors = {
+                chat_id: cursor for chat_id, cursor in self._cursors.items() if chat_id in allowed_chat_ids
+            }
+            self._initialized_chats.intersection_update(allowed_chat_ids)
         except (OSError, ValueError, TypeError) as exc:
             self.ctx.logger.warning("Beeper 同步狀態無法讀取，將重新建立: %s", exc)
 
@@ -761,10 +779,10 @@ class MaiBeeperAdapterPlugin(MaiBotPlugin):
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
         payload = {
-            "version": 2,
+            "version": 3,
             "cursors": self._cursors,
             "initialized_chats": sorted(self._initialized_chats),
-            "paired_chat_ids": sorted(self._paired_chat_ids),
+            "paired_chats": self._paired_chats,
         }
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)

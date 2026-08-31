@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -74,6 +75,7 @@ def build_message_dict(
     if text:
         raw_message.append({"type": "text", "data": text})
     raw_message.extend(image_segments)
+    image_successes = len(image_segments)
     voice_segments = voice_segments or []
     raw_message.extend(voice_segments)
     voice_successes = len(voice_segments)
@@ -85,9 +87,11 @@ def build_message_dict(
             if not isinstance(attachment, Mapping):
                 continue
             kind = str(attachment.get("type") or "").lower()
-            if kind == "img" and image_failures <= 0:
+            if kind == "img" and image_successes > 0:
+                plain_parts.append("[圖片]")
+                image_successes -= 1
                 continue
-            if kind == "img":
+            if kind == "img" and image_failures > 0:
                 failure_label = "[圖片載入失敗]"
                 plain_parts.append(failure_label)
                 raw_message.append({"type": "text", "data": failure_label})
@@ -153,9 +157,11 @@ def build_message_dict(
 
 
 def make_image_segment(data: bytes, mime_type: str, file_name: str = "") -> dict[str, Any]:
+    del mime_type, file_name
     return {
         "type": "image",
-        "data": {"mime_type": mime_type, "file_name": file_name},
+        "data": "",
+        "hash": hashlib.sha256(data).hexdigest(),
         "binary_data_base64": base64.b64encode(data).decode("ascii"),
     }
 

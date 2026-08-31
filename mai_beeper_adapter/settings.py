@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from maibot_sdk import Field, PluginConfigBase
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 GATEWAY_NAME = "beeper_gateway"
 BEEPER_ACCOUNT_ID = "beeper-desktop"
@@ -49,13 +49,24 @@ class BeeperSection(PluginConfigBase):
             "order": 1,
         },
     )
-    allowed_chat_ids: list[str] = Field(
+    chat_names: list[str] = Field(
         default_factory=list,
-        description="只處理這些 Beeper chatID。留空時不會接收任何聊天，日誌會列出近期聊天供複製。",
+        description="輸入要連結的 Beeper 聊天室顯示名稱，再到該聊天室傳送配對文字。刪除名稱會立即停止連結。",
         json_schema_extra={
-            "label": "聊天白名單",
-            "placeholder": "每項填入一個 Beeper chatID",
+            "label": "Beeper 聊天白名單",
+            "placeholder": "每項填入一個聊天室名稱",
             "order": 2,
+        },
+    )
+    pairing_phrase: str = Field(
+        default="#MaiBot配對",
+        min_length=4,
+        max_length=100,
+        description="新增名稱後，到同名 Beeper 聊天室傳送這段完整文字，插件就會自動保存 Beeper ID。",
+        json_schema_extra={
+            "label": "配對文字",
+            "placeholder": "例如：#MaiBot配對5827",
+            "order": 3,
         },
     )
 
@@ -65,62 +76,7 @@ class BeeperSection(PluginConfigBase):
         normalized = str(value or "http://127.0.0.1:23373").strip().rstrip("/")
         return normalized or "http://127.0.0.1:23373"
 
-    @field_validator("allowed_chat_ids", mode="before")
-    @classmethod
-    def normalize_chat_ids(cls, value: Any) -> list[str]:
-        values = value if isinstance(value, list) else ([] if value is None else [value])
-        result: list[str] = []
-        seen: set[str] = set()
-        for item in values:
-            chat_id = str(item or "").strip()
-            if chat_id and chat_id not in seen:
-                seen.add(chat_id)
-                result.append(chat_id)
-        return result
-
-
-class DiscoverySection(PluginConfigBase):
-    __ui_label__: ClassVar[str] = "自動取得聊天室"
-    __ui_order__: ClassVar[int] = 2
-
-    allowed_chat_names: list[str] = Field(
-        default_factory=list,
-        description="填入聊天室顯示名稱。只有唯一且名稱完全相同時才會自動採用，避免選錯同名聊天。",
-        json_schema_extra={
-            "label": "依名稱自動尋找",
-            "placeholder": "每項填入一個聊天室名稱",
-            "order": 0,
-        },
-    )
-    pairing_enabled: bool = Field(
-        default=False,
-        description="開啟後，在要綁定的 Beeper 聊天中傳送下方配對文字，插件便會保存該聊天室。",
-        json_schema_extra={"label": "啟用訊息配對", "order": 1},
-    )
-    pairing_phrase: str = Field(
-        default="#MaiBot配對",
-        min_length=4,
-        max_length=100,
-        description="必須整則訊息完全相同。建議自行加上幾個數字，避免別人碰巧傳出相同文字。",
-        json_schema_extra={
-            "label": "配對文字",
-            "placeholder": "例如：#MaiBot配對5827",
-            "order": 2,
-        },
-    )
-    unpairing_phrase: str = Field(
-        default="#MaiBot取消配對",
-        min_length=4,
-        max_length=100,
-        description="配對模式開啟時，在已配對聊天傳送這段完整文字，可移除插件保存的配對。",
-        json_schema_extra={
-            "label": "取消配對文字",
-            "placeholder": "例如：#MaiBot取消配對",
-            "order": 3,
-        },
-    )
-
-    @field_validator("allowed_chat_names", mode="before")
+    @field_validator("chat_names", mode="before")
     @classmethod
     def normalize_chat_names(cls, value: Any) -> list[str]:
         values = value if isinstance(value, list) else ([] if value is None else [value])
@@ -138,11 +94,6 @@ class DiscoverySection(PluginConfigBase):
     @classmethod
     def normalize_pairing_phrase(cls, value: Any) -> str:
         return str(value or "#MaiBot配對").strip()
-
-    @field_validator("unpairing_phrase", mode="before")
-    @classmethod
-    def normalize_unpairing_phrase(cls, value: Any) -> str:
-        return str(value or "#MaiBot取消配對").strip()
 
 
 class ReliabilitySection(PluginConfigBase):
@@ -175,5 +126,22 @@ class ReliabilitySection(PluginConfigBase):
 class MaiBeeperSettings(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     beeper: BeeperSection = Field(default_factory=BeeperSection)
-    discovery: DiscoverySection = Field(default_factory=DiscoverySection)
     reliability: ReliabilitySection = Field(default_factory=ReliabilitySection)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_discovery_fields(cls, value: Any) -> Any:
+        """保留舊版名稱與配對文字，但不再接受手動 Beeper ID。"""
+
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        beeper = dict(migrated.get("beeper") or {})
+        discovery = migrated.get("discovery")
+        if isinstance(discovery, dict):
+            if "chat_names" not in beeper and discovery.get("allowed_chat_names") is not None:
+                beeper["chat_names"] = discovery.get("allowed_chat_names")
+            if "pairing_phrase" not in beeper and discovery.get("pairing_phrase") is not None:
+                beeper["pairing_phrase"] = discovery.get("pairing_phrase")
+        migrated["beeper"] = beeper
+        return migrated

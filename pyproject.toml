@@ -1,6 +1,6 @@
 [project]
 name = "mai-beeper-adapter"
-version = "0.3.0"
+version = "0.4.3"
 description = "Beeper Desktop API message gateway for MaiBot"
 requires-python = ">=3.10"
 dependencies = []

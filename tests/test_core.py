@@ -59,14 +59,9 @@ class FakeDiscoveryClient(FakeSyncClient):
     def __init__(self) -> None:
         super().__init__()
         self.chat_pages: list[dict[str, Any]] = []
-        self.search_results: dict[str, list[dict[str, Any]]] = {}
 
     async def list_chats(self) -> dict[str, Any]:
         return self.chat_pages.pop(0)
-
-    async def search_chats(self, query: str, *, limit: int = 50) -> dict[str, Any]:
-        del limit
-        return {"items": self.search_results.get(query, []), "hasMore": False}
 
     async def get_chat(self, chat_id: str) -> dict[str, Any]:
         return {"id": chat_id, "title": chat_id, "type": "single"}
@@ -89,9 +84,10 @@ def configured_plugin(tmp_path: Path) -> tuple[MaiBeeperAdapterPlugin, FakeGatew
     plugin.set_plugin_config(
         {
             "plugin": {"enabled": False, "config_version": "1.0.0"},
-            "beeper": {"allowed_chat_ids": ["chat-1"]},
+            "beeper": {"chat_names": ["測試聊天"], "pairing_phrase": "#MaiBot配對5827"},
         }
     )
+    plugin._paired_chats = {"測試聊天": "chat-1"}
     return plugin, gateway
 
 
@@ -183,61 +179,76 @@ def test_sync_state_round_trip(tmp_path: Path) -> None:
     plugin, _ = configured_plugin(tmp_path)
     plugin._cursors = {"chat-1": "cursor-9"}
     plugin._initialized_chats = {"chat-1", "empty-chat"}
-    plugin._paired_chat_ids = {"paired-chat"}
+    plugin._paired_chats = {"測試聊天": "chat-1"}
     plugin._save_state()
 
     restored, _ = configured_plugin(tmp_path)
     restored._load_state()
     assert restored._cursors == {"chat-1": "cursor-9"}
-    assert restored._initialized_chats == {"chat-1", "empty-chat"}
-    assert restored._paired_chat_ids == {"paired-chat"}
+    assert restored._initialized_chats == {"chat-1"}
+    assert restored._paired_chats == {"測試聊天": "chat-1"}
 
 
 @pytest.mark.asyncio
-async def test_unique_exact_chat_name_is_allowed_but_duplicate_is_not(tmp_path: Path) -> None:
+async def test_chat_name_is_not_allowed_until_new_pairing_phrase_is_seen(tmp_path: Path) -> None:
     plugin, _ = configured_plugin(tmp_path)
     plugin.set_plugin_config(
         {
             "plugin": {"enabled": False, "config_version": "1.0.0"},
-            "beeper": {"allowed_chat_ids": []},
-            "discovery": {"allowed_chat_names": ["家人群組", "同名群組"]},
+            "beeper": {"chat_names": ["家人群組"], "pairing_phrase": "#MaiBot配對5827"},
         }
     )
+    plugin._paired_chats = {}
     client = FakeDiscoveryClient()
-    client.chat_pages = [{"items": []}]
-    client.search_results = {
-        "家人群組": [{"id": "family-chat", "title": "家人群組", "network": "Signal"}],
-        "同名群組": [
-            {"id": "duplicate-1", "title": "同名群組"},
-            {"id": "duplicate-2", "title": "同名群組"},
-        ],
-    }
+    client.chat_pages = [
+        {"items": [{"id": "family-chat", "title": "家人群組", "preview": {"id": "old", "text": "早安"}}]},
+        {
+            "items": [
+                {
+                    "id": "family-chat",
+                    "title": "家人群組",
+                    "preview": {"id": "pair", "text": "#MaiBot配對5827"},
+                }
+            ]
+        },
+    ]
     plugin._client = cast(Any, client)
 
     await plugin._refresh_chat_cache()
+    assert plugin._allowed_chat_ids() == set()
+    await plugin._refresh_chat_cache(scan_pairing=True)
 
     assert plugin._allowed_chat_ids() == {"family-chat"}
-    assert "duplicate-1" not in plugin._allowed_chat_ids()
+    assert plugin._paired_chats == {"家人群組": "family-chat"}
 
 
 @pytest.mark.asyncio
-async def test_pairing_ignores_existing_preview_then_saves_new_exact_phrase(tmp_path: Path) -> None:
+async def test_pairing_requires_configured_exact_chat_name(tmp_path: Path) -> None:
     plugin, _ = configured_plugin(tmp_path)
     plugin.set_plugin_config(
         {
             "plugin": {"enabled": False, "config_version": "1.0.0"},
-            "beeper": {"allowed_chat_ids": []},
-            "discovery": {"pairing_enabled": True, "pairing_phrase": "#MaiBot配對5827"},
+            "beeper": {"chat_names": ["正確聊天"], "pairing_phrase": "#MaiBot配對5827"},
         }
     )
+    plugin._paired_chats = {}
     client = FakeDiscoveryClient()
     client.chat_pages = [
         {
             "items": [
                 {
                     "id": "chat-old",
-                    "title": "舊聊天",
+                    "title": "正確聊天",
                     "preview": {"id": "old-preview", "text": "#MaiBot配對5827"},
+                }
+            ]
+        },
+        {
+            "items": [
+                {
+                    "id": "wrong-chat",
+                    "title": "未設定聊天",
+                    "preview": {"id": "wrong-preview", "text": "#MaiBot配對5827"},
                 }
             ]
         },
@@ -250,33 +261,26 @@ async def test_pairing_ignores_existing_preview_then_saves_new_exact_phrase(tmp_
                 }
             ]
         },
-        {
-            "items": [
-                {
-                    "id": "chat-new",
-                    "title": "正確聊天",
-                    "preview": {"id": "unpair-preview", "text": "#MaiBot取消配對"},
-                }
-            ]
-        },
     ]
     plugin._client = cast(Any, client)
 
     await plugin._refresh_chat_cache()
-    assert plugin._paired_chat_ids == set()
+    assert plugin._paired_chats == {}
+    await plugin._refresh_chat_cache(scan_pairing=True)
+    assert plugin._paired_chats == {}
     await plugin._refresh_chat_cache(scan_pairing=True)
 
-    assert plugin._paired_chat_ids == {"chat-new"}
+    assert plugin._paired_chats == {"正確聊天": "chat-new"}
     assert plugin._allowed_chat_ids() == {"chat-new"}
     restored, _ = configured_plugin(tmp_path)
+    restored.set_plugin_config(
+        {
+            "plugin": {"enabled": False, "config_version": "1.0.0"},
+            "beeper": {"chat_names": ["正確聊天"], "pairing_phrase": "#MaiBot配對5827"},
+        }
+    )
     restored._load_state()
-    assert restored._paired_chat_ids == {"chat-new"}
-
-    await plugin._refresh_chat_cache(scan_pairing=True)
-    assert plugin._paired_chat_ids == set()
-    restored_after_unpair, _ = configured_plugin(tmp_path)
-    restored_after_unpair._load_state()
-    assert restored_after_unpair._paired_chat_ids == set()
+    assert restored._paired_chats == {"正確聊天": "chat-new"}
 
 
 @pytest.mark.asyncio
@@ -344,6 +348,41 @@ async def test_gateway_blocks_outbound_chat_outside_allowlist(tmp_path: Path) ->
     assert result["success"] is False
     assert "不在 Beeper 白名單" in result["error"]
     assert client.sends == []
+
+
+@pytest.mark.asyncio
+async def test_removing_chat_name_revokes_saved_id_and_stops_inbound(tmp_path: Path) -> None:
+    plugin, gateway = configured_plugin(tmp_path)
+    plugin._initialized_chats = {"chat-1"}
+    plugin._cursors = {"chat-1": "cursor-old"}
+    plugin._save_state()
+
+    await plugin.on_config_update(
+        "self",
+        {
+            "plugin": {"enabled": False, "config_version": "1.0.0"},
+            "beeper": {"chat_names": [], "pairing_phrase": "#MaiBot配對5827"},
+        },
+        "1.0.0",
+    )
+
+    assert plugin._allowed_chat_ids() == set()
+    assert plugin._paired_chats == {}
+    assert "chat-1" not in plugin._initialized_chats
+    assert "chat-1" not in plugin._cursors
+
+    plugin._client = cast(Any, FakeClient())
+    await plugin._route_inbound(
+        {
+            "id": "message-after-removal",
+            "chatID": "chat-1",
+            "senderID": "sender-1",
+            "text": "不應再收到",
+            "isSender": False,
+            "attachments": [],
+        }
+    )
+    assert gateway.messages == []
 
 
 @pytest.mark.asyncio
